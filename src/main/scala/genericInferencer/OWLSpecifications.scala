@@ -1,4 +1,4 @@
-package calculusGeneration
+package genericInferencer
 
 import java.util.stream.Collectors
 import org.semanticweb.HermiT.Reasoner
@@ -31,30 +31,7 @@ class SimpleGCISpecification extends Specification[OWLSubClassOfAxiom,OWLClassEx
       classSpecification.applySubstitution(sentence.getSuperClass(),map))
   }
 
-  override def minimalSymbols: Seq[OWLSubClassOfAxiom] =
-    classSpecification.minimalSymbols.flatMap( c1 =>
-      classSpecification.minimalSymbols.map(c2 =>
-      factory.getOWLSubClassOfAxiom(c1,c2))
-    )
 
-  override def refine(sentence: OWLSubClassOfAxiom): Seq[OWLSubClassOfAxiom] = {
-    classSpecification.refine(sentence.getSubClass).map(factory.getOWLSubClassOfAxiom(_,sentence.getSuperClass))++
-    classSpecification.refine(sentence.getSuperClass).map(factory.getOWLSubClassOfAxiom(sentence.getSubClass,_))
-  }
-
-  override def validInference(premises: Seq[OWLSubClassOfAxiom], conclusion: OWLSubClassOfAxiom): Boolean = {
-    reasoner.getRootOntology().addAxioms(premises.asJavaCollection)
-    //println("Axioms: "+reasoner.getRootOntology.getAxioms())
-    //println("Check for entailment: "+conclusion)
-    reasoner.flush()
-    val result = if(!reasoner.isConsistent())
-      true
-    else
-      reasoner.isEntailed(conclusion)
-    //println("Entailed: "+result)
-    reasoner.getRootOntology().removeAxioms(premises.asJavaCollection)
-    result
-  }
 
   override def size(sentence: OWLSubClassOfAxiom): Double =
     classSpecification.size(sentence.getSubClass)+classSpecification.size(sentence.getSuperClass)
@@ -162,76 +139,8 @@ class SimpleClassSpecification extends Specification[OWLClassExpression,OWLClass
       }
     })
 
-  override def minimalSymbols: Seq[OWLClassExpression] = {
-    List(factory.getOWLClass(IRI.create("A")))
-  }
 
   private val firstRole = factory.getOWLObjectProperty(IRI.create("R"))
-
-  override def refine(sentence: OWLClassExpression): Seq[OWLClassExpression] =
-    minimalSymbols.flatMap(s =>
-      if(s.equals(sentence))
-        None
-      else {
-        var result = Set[OWLClassExpression]()
-        if(supported.contains(DLConstructor.CONJUNCTION))
-          result ++= Set(conjunction(s,sentence))++Set(conjunction(sentence,s))
-        if(supported.contains(DLConstructor.DISJUNCTION))
-          result ++= Set(disjunction(s,sentence))++Set(conjunction(sentence,s))
-        result
-      }
-    ) ++ {
-      var result = Set[OWLClassExpression]()
-
-      if(supported.contains(DLConstructor.EXISTS))
-        result ++= Set(factory.getOWLObjectSomeValuesFrom(firstRole, sentence))
-
-      if(supported.contains(DLConstructor.FORALL))
-        result ++= Set(factory.getOWLObjectAllValuesFrom(firstRole, sentence))
-
-      result
-    } ++
-      (sentence match {
-    case cl: OWLClass if cl.isTopEntity || cl.isBottomEntity => Seq()
-    case cl: OWLClass if !cl.isTopEntity && !cl.isBottomEntity => {
-      var result = nextConcept(cl)::Nil
-      if(supported.contains(DLConstructor.TOP))
-        result = factory.getOWLThing()::result
-      if(supported.contains(DLConstructor.BOTTOM))
-        result = factory.getOWLNothing()::result
-      result
-    }
-    case int: OWLObjectIntersectionOf => {
-      if (int.getOperandsAsList().size() != 2)
-        throw new IllegalArgumentException("Only supports binary conjunction")
-      else {
-        val c1 = int.getOperandsAsList().get(0)
-        val c2 = int.getOperandsAsList().get(1)
-        refine(c2).filter(!_.equals(c1)).map(conjunction(c1, _)) ++
-          refine(c1).filter(!_.equals(c2)).map(conjunction(_, c2))
-      }
-    }
-    case uni: OWLObjectUnionOf => {
-      if (uni.getOperandsAsList().size() != 2)
-        throw new IllegalArgumentException("Only supports binary conjunction")
-      else {
-        val c1 = uni.getOperandsAsList().get(0)
-        val c2 = uni.getOperandsAsList().get(1)
-        refine(c2).filter(!_.equals(c1)).map(conjunction(c1, _)) ++
-          refine(c1).filter(!_.equals(c2)).map(conjunction(_, c2))
-      }
-    }
-    case ex: OWLObjectSomeValuesFrom => {
-      refine(ex.getFiller).map{
-        factory.getOWLObjectSomeValuesFrom(ex.getProperty,_)
-      }
-    }
-    case all: OWLObjectAllValuesFrom => {
-      refine(all.getFiller).map{
-        factory.getOWLObjectAllValuesFrom(all.getProperty,_)
-      }
-    }
-  })
 
 
   private def conjunction(c1: OWLClassExpression, c2: OWLClassExpression): OWLClassExpression = {
@@ -249,10 +158,6 @@ class SimpleClassSpecification extends Specification[OWLClassExpression,OWLClass
     assert(result.getOperandsAsList.size==2)
     result;
   }
-  override def validInference(premises: Seq[OWLClassExpression], conclusion: OWLClassExpression): Boolean =
-    reasoner.isEntailed(factory.getOWLSubClassOfAxiom(
-      factory.getOWLObjectIntersectionOf(S2J.asJava(premises)), conclusion))
-
   override def size(sentence: OWLClassExpression): Double = {
     val result = sentence.accept(new OWLClassExpressionVisitorEx[Double] {
       override def visit(cl: OWLClass) = 1
@@ -304,33 +209,5 @@ class SimpleClassSpecification extends Specification[OWLClassExpression,OWLClass
   var conceptPos = Map[OWLClass, Int]();
   var posConcept = Map[Int, OWLClass]();
 
-//  conceptPos.+((factory.getOWLClass(IRI.create("A")),0))
-//  posConcept.+((0,factory.getOWLClass(IRI.create("A"))))
-// TODO: check why it doesn't work
-
-  def nextConcept(cl: OWLClass): OWLClass = {
-    conceptPos.get(cl) match {
-      case Some(pos) => posConcept.get(pos+1) match {
-        case Some(cl2) => cl2
-        case None => {
-          val cl2 = factory.getOWLClass(IRI.create("A"+counter))
-          conceptPos = conceptPos.+((cl2,pos+1))
-          posConcept = posConcept.+((pos+1,cl2))
-          counter+=1
-          cl2
-        }
-      }
-      case None => {
-        conceptPos = conceptPos.+((cl,counter))
-        posConcept = posConcept.+((counter,cl))
-        counter+=1
-        val cl2 = factory.getOWLClass(IRI.create("A"+counter))
-        conceptPos = conceptPos.+((cl2,counter))
-        posConcept = posConcept.+((counter,cl2))
-        counter+=1
-        cl2
-      }
-    }
-  }
 
 }
